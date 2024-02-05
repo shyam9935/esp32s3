@@ -1,0 +1,1226 @@
+
+#include <Wire.h>
+#include <EEPROM.h>
+#include <LiquidCrystal_I2C.h>
+#include <MenuBackend.h>
+#include "I2CKeyPad.h"
+#include <SD.h>
+#include <SPI.h>
+#include <ctype.h>
+#include "RTClib.h"
+RTC_DS1307 rtc;
+#include <Arduino.h>
+//#include <esp32-hal-gpio.h>
+#define LCD_ADDRESS 0x27
+#define KEYPAD_ADDRESS 0x23
+#include "RTClib.h"
+#define SCK_PIN 14      // GPIO pin for SCK (clock)
+#define MISO_PIN 12     // GPIO pin for MISO (Master In Slave Out)
+#define MOSI_PIN 13     // GPIO pin for MOSI (Master Out Slave In)
+#define SS_PIN 15       // GPIO pin for SS (Slave Select)
+#define SENSOR1_PIN 19  // Pin for the first sensor
+#define SENSOR2_PIN 20  // Pin for the second sensor
+#define LAST_SENSOR_ADDRESS 0
+bool functionTriggered = false;
+bool lastTouchedSensor1 = false;  // True if Sensor1 was last touched
+bool lastTouchedSensor2 = false;  // True if Sensor2 was last touched
+const int EEPROM_ADDR_UD = 0;
+const int EEPROM_ADDR_LR = 1;
+const int EEPROM_ADDR_FT = 2;
+LiquidCrystal_I2C lcd(LCD_ADDRESS, 20, 4);
+I2CKeyPad keyPad(KEYPAD_ADDRESS);
+bool exitProgram = false;  // global variable to track if we should exit
+static bool isSubMenu = false;
+bool menuOpen = false;
+#define PASSWORD "6666"
+bool enteringNr = false;  // Flag for entering Nr
+bool enteringNc = false;  // Flag for entering Nc
+byte nrInput = 0;         // Variable to store the entered Nr
+String ncInput = "";      // Variable to store the entered Nc
+uint32_t body_Pick;
+const int EEPROM_ADDR_NR = 8;   // EEPROM address for Nr
+const int EEPROM_ADDR_NC = 12;  // EEPROM address for Nc
+#define EEPROM_START_ADDRESS_File 13
+#define FILENAME_SIZE 20
+String fileName;
+bool adminMode = false;          // New flag for admin mode
+bool isSubAdminMode = false;     // Flag for submenu under "Admin Mode"
+int selectedAdmin1SubIndex = 0;  // Tracks currently selected submenu item under "Admin 1"
+int selectedAdmin2SubIndex = 0;  // Tracks currently selected submenu item under "Admin 2"
+int selectedAdmin3SubIndex = 0;  // Tracks currently selected submenu item under "Admin 3"
+int selectedAdmin4SubIndex = 0;  // Tracks currently selected submenu item under "Admin 2"
+int selectedAdmin5SubIndex = 0;
+int startIndex = 0;
+bool enteringPassword = false;  // New flag for entering password
+String passwordInput = "";      // Variable to store the entered password
+#define MAX_FILES 50
+String fileNames[MAX_FILES];
+int fileCount = 0;
+int fileIndex = -1;
+volatile int interruptCounter = 0;
+// Function declarations
+void menuUseEvent(MenuUseEvent used);
+void menuChangeEvent(MenuChangeEvent changed);
+void printMenuItemNames();
+
+MenuBackend menu = MenuBackend(menuUseEvent, menuChangeEvent);
+
+// Menu items definition
+MenuItem mi1 = MenuItem("About Us ");
+MenuItem mi2 = MenuItem("Cpu Designs");
+MenuItem mi3 = MenuItem("Sd Designs");
+MenuItem mi4 = MenuItem("Usb designs");
+MenuItem mi5 = MenuItem("Admin Mode");
+MenuItem mi6 = MenuItem("Master Admin");
+
+MenuItem sub1 = MenuItem("All Up");
+MenuItem sub2 = MenuItem("All down");
+MenuItem sub3 = MenuItem("1up 1down");
+MenuItem sub4 = MenuItem("2up 2down");
+MenuItem sub5 = MenuItem("3up 3down");
+MenuItem sub6 = MenuItem("4up 4down");
+
+MenuItem* menuItems[] = { &mi1, &mi2, &mi3, &mi4, &mi5, &mi6 };
+int selectedIndex = 0;  // Variable to store the selected index
+
+MenuItem* subMenuItems[] = { &sub1, &sub2, &sub3, &sub4, &sub5, &sub6 };
+MenuItem am1 = MenuItem("Up down");
+MenuItem am2 = MenuItem("Left Right");
+MenuItem am3 = MenuItem("File type");
+MenuItem am4 = MenuItem("No of Ribbon");
+MenuItem am5 = MenuItem("No of Cards");
+MenuItem* adminMenuItems[] = { &am1, &am2, &am3, &am4, &am5 };
+MenuItem* admin1SubItems[] = {
+  new MenuItem("Up"),
+  new MenuItem("Down")
+};
+MenuItem* admin2SubItems[] = {
+  new MenuItem("Left"),
+  new MenuItem("Right")
+};
+MenuItem* admin3SubItems[] = {
+  new MenuItem("Ejc"),
+  new MenuItem("Bmp"),
+  new MenuItem("JC5"),
+  new MenuItem("EP"),
+  new MenuItem("Bmp Bedia")
+};
+int selectedAdminIndex = 0;
+int selectedSubIndex = -1;
+bool isBmpMenu = false;
+void setup() {
+  Wire.begin(9, 8);
+  Wire.setClock(400000);  // Set I2C clock speed
+  EEPROM.begin(512);
+  Serial.begin(9600);
+  lcd.init();
+   lcd.init();
+  lcd.backlight();
+  lcd.clear();
+   lcd.setCursor(0, 0);
+  lcd.print("hello");
+  delay(2000);
+  SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN);
+  // Start with the slave deactivated
+  keyPad.begin();
+  keyPad.loadKeyMap("H951R062S*73I#84");
+  if (!SD.begin(SS_PIN)) {
+    Serial.println("SD initialization failed!");
+    lcd.setCursor(3, 0);
+    lcd.print("SD init failed!");
+    while (1)
+      ;
+  }
+  lcd.setCursor(3, 0);
+  lcd.print("SD initIALISED!");
+  delay(5000);
+  // Initialize serial communication
+  fileCount = 0;
+  File root = SD.open("/");
+  while (true) {
+    File entry = root.openNextFile();
+    if (!entry) {
+      // no more files
+      break;
+    }
+    // Check if the file is a bmp file
+    fileName = String(entry.name());
+    if (fileName.endsWith(".bmp") || fileName.endsWith(".BMP")) {
+      if (fileCount < MAX_FILES) {
+        fileNames[fileCount++] = fileName;
+      }
+    }
+    entry.close();
+  }
+  pinMode(SENSOR1_PIN, INPUT_PULLUP);
+  pinMode(SENSOR2_PIN, INPUT_PULLUP);
+
+
+
+  // Initialize the RTC
+  if (!rtc.begin()) {
+    Serial.println("Couldn't find RTC");
+    // while (1)
+    ;
+  }
+
+  // Read the last touched sensor from NVRAM
+  uint8_t lastSensorTouched = rtc.readnvram(LAST_SENSOR_ADDRESS);
+  lastTouchedSensor1 = lastSensorTouched;
+  lastTouchedSensor2 = !lastSensorTouched;
+  // Check if the value read from NVRAM is valid
+  if (lastSensorTouched != 0 && lastSensorTouched != 1) {
+    // If not, initialize it to a known good state
+    lastSensorTouched = 0;
+    rtc.writenvram(LAST_SENSOR_ADDRESS, lastSensorTouched);
+  }
+
+  // Define menu structure
+  menu.getRoot().add(mi1);
+  menu.getRoot().add(mi2).add(sub1).add(sub2).add(sub3).add(sub4).add(sub5).add(sub6);
+  menu.getRoot().add(mi3);
+  menu.getRoot().add(mi4);
+  menu.getRoot().add(mi5);
+  menu.getRoot().add(mi6);
+  lcd.print("Ready.");
+}
+void loop() {
+  static unsigned long lastKeyPressTime = 0;
+  unsigned long currentMillis = millis();
+  bool sensor1Touched = !digitalRead(SENSOR1_PIN);
+  bool sensor2Touched = !digitalRead(SENSOR2_PIN);
+
+  // If no sensor is touched, run function3
+  if (!sensor1Touched && !sensor2Touched) {
+    function3();
+    functionTriggered = false;
+  }
+  // If a function has not been triggered for this touch yet
+  else if (!functionTriggered) {
+    // If the sensors are touched alternately, run function1
+    if ((sensor1Touched && lastTouchedSensor2) || (sensor2Touched && lastTouchedSensor1)) {
+      function1();
+      functionTriggered = true;
+    }
+    // If the same sensor is touched two or more times in a row, run function2
+    else if ((sensor1Touched && lastTouchedSensor1) || (sensor2Touched && lastTouchedSensor2)) {
+      function2();
+      functionTriggered = true;
+    }
+
+    // Update last touched sensor
+    if (sensor1Touched) {
+      lastTouchedSensor1 = true;
+      lastTouchedSensor2 = false;
+      // Write the last touched sensor to NVRAM
+      rtc.writenvram(LAST_SENSOR_ADDRESS, 1);
+    } else if (sensor2Touched) {
+      lastTouchedSensor2 = true;
+      lastTouchedSensor1 = false;
+      // Write the last touched sensor to NVRAM
+      rtc.writenvram(LAST_SENSOR_ADDRESS, 0);
+    }
+  }
+  if (!menuOpen) {
+    lcd.clear();
+    lcd.print("out of Menu");
+    // delay(1000);
+    fileName = readFileNameFromEEPROM();
+    // readAndAnalyzeBmpFile(fileName);
+  }
+  if (keyPad.isPressed() && (currentMillis - lastKeyPressTime >= 200)) {
+    lastKeyPressTime = currentMillis;
+
+    char key = keyPad.getChar();
+    Serial.println(key);
+    if (enteringPassword) {
+      if (isdigit(key)) {      // If the key is a digit
+        passwordInput += key;  // Append the key to the password
+        lcd.clear();
+        lcd.print("Password: ");
+        for (int i = 0; i < passwordInput.length(); i++) {
+          lcd.print('*');  // Print asterisks for entered characters
+        }
+      } else if (key == '#') {            // If the key is '#', attempt to validate the password
+        if (passwordInput == PASSWORD) {  // If password is correct
+          lcd.clear();
+          lcd.print("Password OK");
+          delay(1000);
+          enteringPassword = false;  // Stop entering password
+          adminMode = true;          // Enter admin mode
+          selectedAdminIndex = 0;    // Reset the selected admin index
+          printAdminMenuItems();     // Print the admin menu items
+        } else {                     // If password is not correct
+          lcd.clear();
+          lcd.print("Wrong Password");
+          delay(1000);
+          passwordInput = "";  // Reset the entered password
+        }
+      }
+      return;  // Skip the rest of the loop iteration
+    }
+
+    if (key == '1') {
+      menuOpen = true;  // Open menu
+      lcd.clear();
+      printMenuItemNames();  // Display menu if menu is opened
+      return;                // Skip the rest of the loop iteration
+    }
+
+    if (key == '2' && menuOpen) {
+      menuOpen = false;  // Close menu
+      isBmpMenu = false;
+      isSubMenu = false;
+      lcd.clear();
+      lcd.print("Menu closed");  // Print a message or do something else if menu is closed
+      return;                    // Skip the rest of the loop iteration
+    }
+
+    // Existing code here...
+    // If in the main menu, handle the main options
+    if (menuOpen) {
+
+      if (!isBmpMenu && !isSubMenu) {  // add a check for isBmpMenu here
+        switch (key) {
+          case 'H':
+            menu.moveUp();
+            selectedIndex = (selectedIndex - 1 + 6) % 6;
+            break;
+          case 'I':
+            menu.moveDown();
+            selectedIndex = (selectedIndex + 1) % 6;
+            break;
+          case '3':
+            if (selectedIndex == 0) {  // If Option 1 is selected, handle the sub-options
+
+              lcd.clear();
+              lcd.print("Saaz electronic jacquard");
+              while (true) {  // start an infinite loop
+                if (keyPad.isPressed()) {
+                  char key = keyPad.getChar();
+                  if (key == '1' || key == '2' || key == '4') {  // exit key
+                    break;                                       // break the loop if any of these keys is pressed
+                  }
+                }
+                delay(100);  // small delay to avoid excessive CPU use
+                menu.use();
+              }
+            }
+            if (selectedIndex == 3) {  // If Option 4 is selected, handle the sub-options
+              lcd.clear();
+              lcd.print("In Usb design");
+              delay(1000);
+              menu.use();
+            }
+            if (selectedIndex == 1) {  // If Option 2 is selected, handle the sub-options
+              isSubMenu = true;        // Enter the submenu
+              printSubMenuItems();
+            }
+            if (adminMode) {  // If in admin mode, handle the admin options
+              // Perform an action based on the selected admin option
+              // ...
+            } else if (selectedIndex == 4 && !enteringPassword) {  // If Option 5 (Admin Mode) is selected and not entering password
+              enteringPassword = true;                             // Start entering password
+              lcd.clear();
+              lcd.print("Enter Password");
+              passwordInput = "";  // Reset the entered password
+              return;
+            } else if (selectedIndex == 4 && enteringPassword) {  // If entering password
+              if (passwordInput == PASSWORD) {                    // If password is correct
+                lcd.clear();
+                lcd.print("Password OK");
+                delay(1000);
+                enteringPassword = false;  // Stop entering password
+                adminMode = true;          // Enter admin mode
+                selectedAdminIndex = 0;    // Reset the selected admin index
+                printAdminMenuItems();     // Print the admin menu items
+              } else {                     // If password is not correct
+                lcd.clear();
+                lcd.print("Wrong Password");
+                delay(1000);
+                enteringPassword = false;  // Stop entering password
+                printMenuItemNames();      // Print the main menu items
+              }
+              return;
+            } else {
+              // Execute custom code for other options
+              if (selectedIndex == 2) {  // If Option 3 is selected
+                menu.use();              // Trigger the built-in action for the selected item
+                lcd.clear();             // Enter the bmp file list as a submenu
+                printBmpFiles();
+                isBmpMenu = true;  // Enter the bmp files menu
+              } else {
+                menu.use();  // Trigger the built-in action for the selected item
+              }
+            }
+            break;
+          case '4':
+            menu.moveBack();
+            break;
+          default:
+            lcd.clear();
+            lcd.print("Invalid key press");
+            delay(1000);
+        }
+        if (!isBmpMenu && !isSubMenu)  // add a check for isBmpMenu here as well
+          printMenuItemNames();
+      }
+
+
+
+      if (isSubMenu) {  // If in the submenu, handle the sub-options
+        switch (key) {
+          case '2':
+            exitProgram = true;  // Exit the program
+            lcd.clear();
+            lcd.print("Program exited");
+            return;  // Immediately return from loop
+                     // Other case statements here...
+        }
+      } else {  // If in the main menu, handle the main options
+        switch (key) {
+          case '2':
+            exitProgram = true;  // Exit the program
+            lcd.clear();
+            lcd.print("Program exited");
+            return;  // Immediately return from loop
+                     // Other case statements here...
+        }
+      }
+
+      if (isSubMenu) {  // If in the submenu, handle the sub-options
+        switch (key) {
+          case 'H':
+            menu.moveUp();
+            selectedSubIndex--;
+            if (selectedSubIndex < 0)
+              selectedSubIndex = 5;
+            printSubMenuItems();
+            break;
+          case 'I':
+            menu.moveDown();
+            selectedSubIndex++;
+            if (selectedSubIndex > 5)
+              selectedSubIndex = 0;
+            printSubMenuItems();
+            break;
+          case '3':
+            // Perform an action based on the selected sub-option
+            // Delay for 1 second (if necessary)
+            Serial.println(selectedSubIndex);
+            cpuDesigns();
+            lcd.clear();
+            printSubMenuItems();
+            break;
+          case '4':
+            menu.moveBack();
+            selectedSubIndex = -1;
+            isSubMenu = false;  // Exit the submenu
+            selectedIndex = 1;  // Set to Option 2
+            printMenuItemNames();
+            break;
+          default:
+            lcd.clear();
+            lcd.print("Invalid key press");
+            delay(1000);
+            printSubMenuItems();
+        }
+      }
+      if (isBmpMenu) {  // If in the bmp files menu, handle the navigation
+        switch (key) {
+          case 'H':
+            fileIndex = (fileIndex - 1 + fileCount) % fileCount;
+            printBmpFiles();
+            break;
+
+          case 'I':
+            fileIndex = (fileIndex + 1) % fileCount;
+            printBmpFiles();
+            break;
+          case '3':
+            // Perform an action based on the selected file
+            if (fileIndex < 0) {
+
+            } else {
+              lcd.clear();
+
+              fileName = fileNames[fileIndex];
+              if (writeFileNameToEEPROM(fileName))
+                Serial.println("Filename Saved");
+            }
+            fileName = readFileNameFromEEPROM();
+            readAndAnalyzeBmpFile(fileName);
+            // Add your code here to perform additional actions for the selected file
+
+
+            if (fileIndex < 0) {
+              fileIndex = 0;
+              printBmpFiles();
+            } else
+              printBmpFiles();
+            break;
+          case '4':
+            fileIndex = -1;
+            isBmpMenu = false;  // Exit the bmp files menu
+            selectedIndex = 2;  // Set to Option 3
+            printMenuItemNames();
+            break;
+          default:
+            lcd.clear();
+            lcd.print("Invalid key press");
+            delay(1000);
+            printBmpFiles();
+        }
+      }
+      if (adminMode) {  // If in admin mode
+        switch (key) {
+          case 'H':  // Move up
+            if (isSubAdminMode) {
+              // Here, we move up in the selected sub-menu. We would have similar code for each admin option.
+              switch (selectedAdminIndex) {
+                case 0:  // Admin option 1
+                  selectedAdmin1SubIndex = (selectedAdmin1SubIndex - 1 + sizeof(admin1SubItems) / sizeof(admin1SubItems[0])) % (sizeof(admin1SubItems) / sizeof(admin1SubItems[0]));
+                  printAdmin1SubItems();
+                  break;
+                case 1:  // Admin option 2
+                  selectedAdmin2SubIndex = (selectedAdmin2SubIndex - 1 + sizeof(admin2SubItems) / sizeof(admin2SubItems[0])) % (sizeof(admin2SubItems) / sizeof(admin2SubItems[0]));
+                  printAdmin2SubItems();
+                  break;
+                case 2:  // Admin option 3
+                  selectedAdmin3SubIndex = (selectedAdmin3SubIndex - 1 + sizeof(admin3SubItems) / sizeof(admin3SubItems[0])) % (sizeof(admin3SubItems) / sizeof(admin3SubItems[0]));
+                  printAdmin3SubItems();
+                  break;
+              }
+            } else {
+              selectedAdminIndex = (selectedAdminIndex - 1 + sizeof(adminMenuItems) / sizeof(adminMenuItems[0])) % (sizeof(adminMenuItems) / sizeof(adminMenuItems[0]));
+              printAdminMenuItems();
+            }
+            break;
+          case 'I':  // Move down
+            if (isSubAdminMode) {
+              // Here, we move down in the selected sub-menu. We would have similar code for each admin option.
+              switch (selectedAdminIndex) {
+                case 0:  // Admin option 1
+                  selectedAdmin1SubIndex = (selectedAdmin1SubIndex + 1) % (sizeof(admin1SubItems) / sizeof(admin1SubItems[0]));
+                  printAdmin1SubItems();
+                  break;
+                case 1:  // Admin option 2
+                  selectedAdmin2SubIndex = (selectedAdmin2SubIndex + 1) % (sizeof(admin2SubItems) / sizeof(admin2SubItems[0]));
+                  printAdmin2SubItems();
+                  break;
+                case 2:  // Admin option 3
+                  selectedAdmin3SubIndex = (selectedAdmin3SubIndex + 1) % (sizeof(admin3SubItems) / sizeof(admin3SubItems[0]));
+                  printAdmin3SubItems();
+                  break;
+              }
+            } else {
+              selectedAdminIndex = (selectedAdminIndex + 1) % (sizeof(adminMenuItems) / sizeof(adminMenuItems[0]));
+              printAdminMenuItems();
+            }
+            break;
+          case '3':  // Select
+
+            if (key == '3') {
+              if (adminMode && !isSubAdminMode) {
+                switch (selectedAdminIndex) {
+                    // Your existing code here...
+                    // Perform an action based on the selected admin option
+                  case 0:
+                    // If Admin Option 1 is selected, print its sub-options
+                    lcd.clear();
+                    isSubAdminMode = true;
+                    printAdmin1SubItems();
+                    delay(500);
+                    break;
+                  case 1:
+                    // If Admin Option 1 is selected, print its sub-options
+                    lcd.clear();
+                    isSubAdminMode = true;
+                    printAdmin2SubItems();
+                    delay(500);
+                    break;
+                  case 2:
+                    // If Admin Option 1 is selected, print its sub-options
+                    lcd.clear();
+                    isSubAdminMode = true;
+                    printAdmin3SubItems();
+                    delay(500);
+                    break;
+                  case 3:
+                    // If Admin Option 1 is selected, print its sub-options
+                    lcd.clear();
+                    isSubAdminMode = true;
+                    printAdmin4SubItems();
+                    delay(500);
+                    break;
+                  case 4:
+                    // If Admin Option 1 is selected, print its sub-options
+                    lcd.clear();
+                    isSubAdminMode = true;
+                    printAdmin5SubItems();
+                    delay(500);
+                    break;
+                }
+              } else if (isSubAdminMode) {
+                // Handle the key inputs for the submenus under "Admin Mode"
+                switch (selectedAdminIndex) {
+                  case 0:  // If in submenu for Admin 1
+                    switch (selectedAdmin1SubIndex) {
+                      case 0:  // If Sub-option 1 is selected
+                        lcd.clear();
+                        lcd.print("Admin 1 Sub 1 selected");
+                        delay(1000);
+                        EEPROM.write(EEPROM_ADDR_UD, 'a');  // Save choice to EEPROM
+                        EEPROM.commit();                    // Necessary for ESP32
+                        break;
+                      case 1:  // If Sub-option 2 is selected
+                        lcd.clear();
+                        lcd.print("Admin 1 Sub 2 selected");
+                        delay(1000);
+                        EEPROM.write(EEPROM_ADDR_UD, 'b');  // Save choice to EEPROM
+                        EEPROM.commit();                    // Necessary for ESP32
+                        break;
+                    }
+                    break;
+                  case 1:
+                    switch (selectedAdmin2SubIndex) {
+                      case 0:  // If Sub-option 1 is selected
+                        lcd.clear();
+                        lcd.print("Admin 2 Sub 1 selected");
+                        delay(1000);
+                        EEPROM.write(EEPROM_ADDR_LR, 'a');  // Save choice to EEPROM
+                        EEPROM.commit();                    // Necessary for ESP32
+                        break;
+                      case 1:  // If Sub-option 2 is selected
+                        lcd.clear();
+                        lcd.print("Admin 2 Sub 2 selected");
+                        delay(1000);
+                        EEPROM.write(EEPROM_ADDR_LR, 'b');  // Save choice to EEPROM
+                        EEPROM.commit();                    // Necessary for ESP32
+                        break;
+                    }
+                    break;
+                  case 2:  // If in submenu for Admin 3
+                    switch (selectedAdmin3SubIndex) {
+                      case 0:  // If Sub-option 1 is selected
+                        lcd.clear();
+                        lcd.print("Admin 3 Sub 1 selected");
+                        delay(1000);
+                        EEPROM.write(EEPROM_ADDR_FT, 'a');  // Save choice to EEPROM
+                        EEPROM.commit();
+                        break;
+                      case 1:  // If Sub-option 2 is selected
+                        lcd.clear();
+                        lcd.print("Admin 3 Sub 2 selected");
+                        delay(1000);
+                        EEPROM.write(EEPROM_ADDR_FT, 'b');  // Save choice to EEPROM
+                        EEPROM.commit();
+                        break;
+                      case 2:  // If Sub-option 3 is selected
+                        lcd.clear();
+                        lcd.print("Admin 3 Sub 3 selected");
+                        delay(1000);
+                        EEPROM.write(EEPROM_ADDR_FT, 'c');  // Save choice to EEPROM
+                        EEPROM.commit();
+                        break;
+                      case 3:  // If Sub-option 4 is selected
+                        lcd.clear();
+                        lcd.print("Admin 3 Sub 4 selected");
+                        delay(1000);
+                        EEPROM.write(EEPROM_ADDR_FT, 'd');  // Save choice to EEPROM
+                        EEPROM.commit();
+                        break;
+                      case 4:  // If Sub-option 4 is selected
+                        lcd.clear();
+                        lcd.print("Admin 3 Sub 5 selected");
+                        delay(1000);
+                        EEPROM.write(EEPROM_ADDR_FT, 'e');  // Save choice to EEPROM
+                        EEPROM.commit();
+                        break;
+                    }
+                    break;
+                    // case 3:
+                    //  printAdmin4SubItems(key);
+                    // Serial.print("case 4 deteced");
+                    // break;
+                }
+              }
+            } else if (key == '4' && adminMode && isSubAdminMode) {
+              // If '4' is pressed and we're in a submenu under "Admin Mode", exit the submenu
+              isSubAdminMode = false;
+            }
+            break;
+          case '4':  // Back
+            if (isSubAdminMode) {
+              isSubAdminMode = false;
+              selectedAdmin1SubIndex = 0;  // Reset sub-option index to 0
+              printAdminMenuItems();
+            } else {
+              adminMode = false;         // Exit the admin mode
+              enteringPassword = false;  // Stop entering password
+              lcd.clear();
+              printMenuItemNames();
+            }
+            break;
+
+          default:
+            lcd.clear();
+            lcd.print("Invalid key press");
+            delay(1000);
+            printAdminMenuItems();
+        }
+        return;
+      }
+    }
+  }
+}
+
+
+void menuUseEvent(MenuUseEvent used) {
+  // lcd.clear();
+  // lcd.print(used.item.getName());
+  // Serial.println("menu use event fired");
+  //  lcd.clear();
+  // lcd.print(used.item.getName());
+
+  // Serial.print("Used item name: ");
+  // Serial.println(used.item.getName());
+  // Serial.print("mi1 name: ");
+  // Serial.println(mi1.getName());
+  // delay(2000);
+  //  menu.setCurrent(menuItems[selectedIndex]);
+  // Perform an action based on the selected menu item
+  if (&used.item == &mi1) {
+    Serial.println("option 1 selected");
+    lcd.clear();
+    lcd.print("Option 1 selected");
+    selectedIndex = 0;  // Reset the selected index
+    delay(1000);        // Delay for 1 second (if necessary)
+    // Add your code here to perform additional actions for Option 1
+  } else if (&used.item == &mi2) {
+    // Display sub-options when Option 2 is selected
+    // selectedSubIndex = 0;
+    // lcd.clear();
+    //  printSubMenuItems();
+    // isSubMenu = true;  // Enter the submenu
+  }
+  if (&used.item == &mi3) {
+    // lcd.clear();
+    // fileIndex = 0;  // Reset the file index
+    // printBmpFiles();
+    // isBmpMenu = true;  // Enter the bmp files menu
+  } else if (&used.item == &mi4) {
+    // selectedIndex = 3;
+    //  lcd.clear();
+    // lcd.print("4 selected");
+    // delay(2000);
+    // Action for Option 4
+    // Add your code here
+  } else if (&used.item == &mi5) {
+    // Action for Option 5
+    // Add your code here
+  } else if (&used.item == &mi6) {
+    // Action for Option 6
+    // Add your code here
+  }
+}
+
+void menuChangeEvent(MenuChangeEvent changed) {
+  lcd.clear();
+  lcd.print(changed.from.getName());
+  lcd.setCursor(0, 1);
+  lcd.print("->");
+  lcd.setCursor(0, 2);
+  lcd.print(changed.to.getName());
+}
+
+void printMenuItemNames() {
+  lcd.clear();
+
+  int startRow = selectedIndex - 2;
+  int endRow = selectedIndex + 1;
+
+  if (startRow < 0) {
+    startRow =
+      0;
+    endRow = 3;
+  }
+
+  if (endRow >= 6) {
+    endRow = 5;
+    startRow = selectedIndex - 3;
+  }
+
+  char buf[21];  // buffer to hold the string
+  for (int i = startRow; i <= endRow; i++) {
+    lcd.setCursor(0, i - startRow);
+    // Check if the current menu item is the same as the selected one
+    if (i == selectedIndex) {
+      // If it is, prepend with a '>'
+      sprintf(buf, ">%d: %s", i + 1, menuItems[i]->getName());
+    } else {
+      // If it's not, print normally
+      sprintf(buf, " %d: %s", i + 1, menuItems[i]->getName());
+    }
+    lcd.print(buf);
+  }
+}
+void printSubMenuItems() {
+  lcd.clear();
+
+  int startRow = selectedSubIndex - 2;
+  int endRow = selectedSubIndex + 1;
+
+  if (startRow < 0) {
+    startRow = 0;
+    endRow = 3;
+  }
+
+  if (endRow >= 6) {
+    endRow = 5;
+    startRow = selectedSubIndex - 3;
+  }
+
+  char buf[21];  // buffer to hold the string
+  for (int i = startRow; i <= endRow; i++) {
+    lcd.setCursor(0, i - startRow);
+    // Check if the current sub-menu item is the same as the selected one
+    if (i == selectedSubIndex) {
+      // If it is, prepend with a '>'
+      sprintf(buf,
+              ">%d: %s", i + 1, subMenuItems[i]->getName());
+    } else {
+      // If it's not, print normally
+      sprintf(buf, " %d: %s", i + 1, subMenuItems[i]->getName());
+    }
+    lcd.print(buf);
+  }
+}
+void printBmpFiles() {
+  lcd.clear();
+
+  int startRow = fileIndex - 2;
+  int endRow = fileIndex + 1;
+
+  if (startRow < 0) {
+    startRow = 0;
+    endRow = 3;
+  }
+
+  if (endRow >= fileCount) {
+    endRow = fileCount - 1;
+    startRow = fileIndex - 3;
+  }
+
+  char buf[21];  // buffer to hold the string
+  for (int i = startRow; i <= endRow; i++) {
+    lcd.setCursor(0, i - startRow);
+    // Check if the current file is the same as the selected one
+    if (i == fileIndex) {
+      // If it is, prepend with a '>'
+      sprintf(buf, ">%d: %s", i + 1, fileNames[i].c_str());
+    } else {
+      // If it's not, print normally
+      sprintf(buf, " %d: %s", i + 1, fileNames[i].c_str());
+    }
+    lcd.print(buf);
+  }
+}
+void printAdminMenuItems() {
+  lcd.clear();
+
+  int startRow = selectedAdminIndex - 2;
+  int endRow = selectedAdminIndex + 1;
+
+  if (startRow < 0) {
+    startRow = 0;
+    endRow = 3;
+  }
+
+  if (endRow >= 5) {
+    endRow = 4;
+    startRow = selectedAdminIndex - 3;
+  }
+
+  char buf[21];  // buffer to hold the string
+  for (int i = startRow; i <= endRow; i++) {
+    lcd.setCursor(0, i - startRow);
+    if (i == selectedAdminIndex) {
+      sprintf(buf, ">%d: %s", i + 1, adminMenuItems[i]->getName());
+    } else {
+      sprintf(buf, " %d: %s", i + 1, adminMenuItems[i]->getName());
+    }
+    lcd.print(buf);
+  }
+}
+void printAdmin1SubItems() {
+  lcd.clear();
+  char eepromValue = EEPROM.read(EEPROM_ADDR_UD);  // Read value from EEPROM
+
+  for (int i = 0; i < sizeof(admin1SubItems) / sizeof(admin1SubItems[0]); i++) {
+    lcd.setCursor(0, i);
+    if (i == selectedAdmin1SubIndex) {
+      lcd.print(">");
+    } else {
+      lcd.print(" ");
+    }
+    lcd.setCursor(1, i);
+    lcd.print(admin1SubItems[i]->getName());
+
+    if ((eepromValue == 'a' && i == 0) || (eepromValue == 'b' && i == 1)) {
+      lcd.setCursor(15, i);
+      lcd.print("<S");  // Display "<S" to indicate the saved choice
+    }
+  }
+}
+
+void printAdmin2SubItems() {
+  lcd.clear();
+  char eepromValue = EEPROM.read(EEPROM_ADDR_LR);  // Read value from EEPROM
+
+  for (int i = 0; i < sizeof(admin2SubItems) / sizeof(admin2SubItems[0]); i++) {
+    lcd.setCursor(0, i);
+    if (i == selectedAdmin2SubIndex) {
+      lcd.print(">");
+    } else {
+      lcd.print(" ");
+    }
+    lcd.setCursor(1, i);
+    lcd.print(admin2SubItems[i]->getName());
+
+    if ((eepromValue == 'a' && i == 0) || (eepromValue == 'b' && i == 1)) {
+      lcd.setCursor(15, i);
+      lcd.print("<S");  // Display "<S" to indicate the saved choice
+    }
+  }
+}
+
+
+
+// Define starting index for display
+
+
+void printAdmin3SubItems() {
+  lcd.clear();
+  char eepromValue = EEPROM.read(EEPROM_ADDR_FT);  // Read value from EEPROM
+
+  Serial.print("EEPROM Value: ");
+  Serial.println(eepromValue);  // This will print the value that was read from the EEPROM.
+
+  // Handle scrolling: if selected index is beyond display, shift starting index
+  if (selectedAdmin3SubIndex > startIndex + 3) {
+    startIndex = selectedAdmin3SubIndex - 3;
+  } else if (selectedAdmin3SubIndex < startIndex) {
+    startIndex = selectedAdmin3SubIndex;
+  }
+
+  // Only display up to 4 options at a time
+  for (int i = 0; i < 4 && i + startIndex < sizeof(admin3SubItems) / sizeof(admin3SubItems[0]); i++) {
+    lcd.setCursor(0, i);
+    if (i + startIndex == selectedAdmin3SubIndex) {
+      lcd.print(">");
+    } else {
+      lcd.print(" ");
+    }
+    lcd.setCursor(1, i);
+    lcd.print(admin3SubItems[i + startIndex]->getName());
+
+    // Show "< Selected" based on EEPROM value
+    char currentItem = 'a' + (i + startIndex);
+    if (currentItem == eepromValue) {
+      lcd.setCursor(15, i);  // Set cursor to the end of the line (adjust this as needed)
+      lcd.print("<S");       // Display an arrow and "S" to indicate the saved choice
+    }
+
+    Serial.print("Index: ");
+    Serial.print(i + startIndex);
+    Serial.print(" - EEPROM Value: ");
+    Serial.println(eepromValue);
+    Serial.print("Current Item: ");
+    Serial.println(currentItem);
+  }
+}
+void printAdmin4SubItems() {
+  lcd.clear();
+  byte eepromValue = EEPROM.read(EEPROM_ADDR_NR);
+
+  lcd.setCursor(0, 0);
+  lcd.print("Nr = ");
+  lcd.print(eepromValue);
+
+  lcd.setCursor(0, 1);
+  lcd.print("Press '*' to edit");
+
+  bool enteringNr = false;
+  byte nrInput = 0;
+
+  char key = keyPad.getChar();
+
+  while (true) {
+    if (key) {
+      Serial.println(key);  // print the key to Serial Monitor for debugging
+    }
+
+    if (key == '*') {
+      enteringNr = true;
+      nrInput = 0;
+    } else if (key >= '0' && key <= '9' && enteringNr) {
+      nrInput = nrInput * 10 + (key - '0');
+      lcd.setCursor(0, 2);
+      lcd.print(nrInput);
+    } else if (key == '#') {
+      if (enteringNr && nrInput <= 32) {
+        EEPROM.write(EEPROM_ADDR_NR, nrInput);
+        if (EEPROM.commit()) {
+          Serial.println("EEPROM successfully committed");
+        } else {
+          Serial.println("Error committing to EEPROM");
+        }
+        enteringNr = false;
+      }
+
+      break;  // exit the while loop if '#' is pressed
+    }
+
+    key = keyPad.getChar();
+    delay(200);  // delay for debouncing
+  }
+
+  byte newValue = EEPROM.read(EEPROM_ADDR_NR);
+  lcd.setCursor(0, 3);
+  lcd.print("New value in EEPROM: ");
+  lcd.print(newValue);
+}
+
+
+void printAdmin5SubItems() {
+  lcd.clear();
+  byte eepromValue = EEPROM.read(EEPROM_ADDR_NC);
+
+  lcd.setCursor(0, 0);
+  lcd.print("Nc = ");
+  lcd.print(eepromValue);
+
+  lcd.setCursor(0, 1);
+  lcd.print("Press '*' to edit");
+
+  bool enteringNc = false;
+  byte ncInput = 0;
+
+  char key = keyPad.getChar();
+
+  while (true) {
+    if (key) {
+      Serial.println(key);  // print the key to Serial Monitor for debugging
+    }
+
+    if (key == '*') {
+      enteringNc = true;
+      ncInput = 0;
+    } else if (key >= '0' && key <= '9' && enteringNc) {
+      ncInput = ncInput * 10 + (key - '0');
+      lcd.setCursor(0, 2);
+      lcd.print(ncInput);
+    } else if (key == '#') {
+      if (enteringNc && ncInput <= 32) {
+        EEPROM.write(EEPROM_ADDR_NC, ncInput);
+        if (EEPROM.commit()) {
+          Serial.println("EEPROM successfully committed");
+        } else {
+          Serial.println("Error committing to EEPROM");
+        }
+        enteringNc = false;
+      }
+
+      break;  // exit the while loop if '#' is pressed
+    }
+
+    key = keyPad.getChar();
+    delay(200);  // delay for debouncing
+  }
+
+  byte newValue = EEPROM.read(EEPROM_ADDR_NC);
+  lcd.setCursor(0, 3);
+  lcd.print("New value in EEPROM: ");
+  lcd.print(newValue);
+}
+void cpuDesigns() {
+  if (selectedSubIndex == 0) {
+    lcd.clear();
+    lcd.print("I am in all up");
+    delay(1000);
+  }
+  if (selectedSubIndex == 0) {
+    lcd.clear();
+    lcd.print("I am in all up");
+    delay(1000);
+  }
+  if (selectedSubIndex == 1) {
+    lcd.clear();
+    lcd.print("I am in all down");
+    delay(1000);
+  }
+  if (selectedSubIndex == 2) {
+    lcd.clear();
+    lcd.print("I am in 1up 1down");
+    delay(1000);
+  }
+  if (selectedSubIndex == 3) {
+    lcd.clear();
+    lcd.print("I am in 2up 2down");
+    delay(1000);
+  }
+  if (selectedSubIndex == 4) {
+    lcd.clear();
+    lcd.print("I am in 3up 3down");
+    delay(1000);
+  }
+  if (selectedSubIndex == 5) {
+    lcd.clear();
+    lcd.print("I am in 4up 4down");
+    delay(1000);
+  } else if (selectedSubIndex == -1) {
+    // Do nothing (or perform some default action) when no submenu item is selected
+  }
+}
+
+
+void readAndAnalyzeBmpFile(const String& fileName) {
+  Serial.println("Attempting to open file: " + fileName);
+
+  String filePath = "/" + fileName;  // Add a leading '/' to form the file path
+
+  File fileBody = SD.open(filePath.c_str());
+  if (!fileBody) {
+    Serial.println("Error opening file " + fileName);
+    lcd.clear();
+    lcd.print("Error opening file");
+    delay(1000);
+    return;
+  }
+
+  if (fileBody.size() < 54) {  // BMP file header is 54 bytes
+    Serial.println("Error: Not a correct BMP file");
+    lcd.clear();
+    lcd.print("Not a correct BMP file");
+    delay(1000);
+    fileBody.close();
+    return;
+  }
+
+  unsigned char bmpHeader[54];
+  fileBody.read(bmpHeader, sizeof(bmpHeader));
+  // BMP width in pixels is bytes 18-21
+  unsigned int bmpWidth = *(unsigned int*)&bmpHeader[18];
+  // BMP height in pixels is bytes 22-25
+  unsigned int bmpHeight = *(unsigned int*)&bmpHeader[22];
+
+  // Bit depth is bytes 28-29
+  unsigned int bitDepth = *(unsigned short*)&bmpHeader[28];
+
+  // Determine if the image is color or monochrome
+  String colorInfo = bitDepth > 1 ? "Color" : "Monochrome";
+  Serial.println("Width: " + String(bmpWidth) + ", Height: " + String(bmpHeight) + ", Color Info: " + colorInfo);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(fileName);
+  lcd.setCursor(0, 1);
+  lcd.print("Width: " + String(bmpWidth));
+  lcd.setCursor(0, 2);
+  lcd.print("Height: " + String(bmpHeight));
+  lcd.setCursor(0, 3);
+  lcd.print("Info: " + colorInfo);
+  delay(2000);  // Give a 1 second delay
+}
+
+bool writeFileNameToEEPROM(const String& fileName) {
+  if (fileName.length() > FILENAME_SIZE - 1) {
+    Serial.println("File name too long for EEPROM storage");
+    return false;
+  }
+
+  // Clear previous file name from EEPROM
+  for (int i = 0; i < FILENAME_SIZE; i++) {
+    EEPROM.write(EEPROM_START_ADDRESS_File + i, 0);
+  }
+
+  // Write the new file name to EEPROM
+  for (int i = 0; i < fileName.length(); i++) {
+    EEPROM.write(EEPROM_START_ADDRESS_File + i, fileName[i]);
+  }
+  EEPROM.commit();
+
+  return true;
+}
+
+String readFileNameFromEEPROM() {
+  char fileName[FILENAME_SIZE] = { 0 };
+  int i = 0;
+  while (i < FILENAME_SIZE) {
+    char ch = EEPROM.read(EEPROM_START_ADDRESS_File + i);
+    if (ch == 0) {
+      break;
+    }
+    fileName[i] = ch;
+    i++;
+  }
+
+  return String(fileName);
+}
+void writeNumberToNVRAM(uint8_t address, unsigned long number) {
+  byte buffer[4];
+  buffer[0] = (number >> 24) & 0xFF;
+  buffer[1] = (number >> 16) & 0xFF;
+  buffer[2] = (number >> 8) & 0xFF;
+  buffer[3] = number & 0xFF;
+
+  Wire.beginTransmission(0x68);  // DS1307 I2C address
+  Wire.write(address);
+  Wire.write(buffer, 4);
+  Wire.endTransmission();
+}
+
+// Function to read a 4-byte number from DS1307 NVRAM
+unsigned long readNumberFromNVRAM(uint8_t address) {
+  byte buffer[4];
+
+  Wire.beginTransmission(0x68);  // DS1307 I2C address
+  Wire.write(address);
+  Wire.endTransmission();
+
+  Wire.requestFrom(0x68, 4);  // Request 4 bytes from DS1307 NVRAM
+
+  if (Wire.available()) {
+    buffer[0] = Wire.read();
+    buffer[1] = Wire.read();
+    buffer[2] = Wire.read();
+    buffer[3] = Wire.read();
+  }
+
+  unsigned long number = ((unsigned long)buffer[0] << 24) | ((unsigned long)buffer[1] << 16) | ((unsigned long)buffer[2] << 8) | (unsigned long)buffer[3];
+
+  return number;
+}
+void function1() {
+  Serial.println("i am in function 1");
+  byte data = 0b10101010;  // Replace this with your actual data
+
+  // Send the data:
+  digitalWrite(SS_PIN, LOW);  // Activate the slave
+  SPI.transfer(data);
+  digitalWrite(SS_PIN, HIGH);  // Deactivate the slave
+  // delay(2000);
+  // Your code for function1 goes here
+}
+
+void function2() {
+  Serial.println("i am in function 2");
+  //  delay(2000);
+  // Your code for function2 goes here
+}
+
+void function3() {
+  //Serial.println("i am in function 3");
+  //delay(2000);
+  // Your code for function3 goes here
+}
